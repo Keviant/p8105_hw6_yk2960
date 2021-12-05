@@ -1,0 +1,262 @@
+---
+title: "p8105_hw6_yk2960"
+author: "Youyuan(Keviant) Kong"
+date: "2021/12/3"
+output: github_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(p8105.datasets)
+library(readxl)
+library(glmnet)
+library(mgcv)
+library(modelr)
+library(patchwork)
+library(ggplot2)
+```
+
+
+## Problem 1
+
+First, we get the data from the file, convert 5 variables to factor variables:
+</br>
+babysex,frace,malfrom and mrace.</br>
+And there is no missing data in this data frame. </br>
+
+```{r p1_clean_data}
+bw_df<-read.csv("data/birthweight.csv") %>% 
+  janitor::clean_names() 
+
+bw_df<-bw_df %>% 
+  mutate(babysex=factor(babysex,
+                           levels = c(1,2),
+                           labels = c("male","female")),
+         frace=factor(frace,
+                   levels = c(1,2,3,4,8,9),
+                   labels = c("White","Black","Asian","Puerto.rican","Other","Unkown")),
+         malform=factor(malform,
+                     levels = c(0,1),
+                     labels = c("absense","present")),
+         mrace=factor(mrace,
+               levels = c(1,2,3,4,8),
+               labels = c("White","Black","Asian","Puerto.rican","Other")))
+
+
+bw_df_clean <-bw_df %>% 
+  drop_na()
+```
+
+About data-driven model-building process, I use LASSO to remove some 
+variables. 
+```{r p1_varable_choose}
+x = model.matrix(bwt ~ ., bw_df)[,-1]
+y = bw_df$bwt
+```
+
+
+```{r }
+lambda = 10^(seq(3, -2, -0.1))
+
+lasso_fit =
+  glmnet(x, y, lambda = lambda)
+
+lasso_cv =
+  cv.glmnet(x, y, lambda = lambda)
+
+lambda_opt = lasso_cv$lambda.min
+
+```
+
+```{r}
+selected_cols<-broom::tidy(lasso_fit) %>% 
+  select(term, lambda, estimate) %>% 
+  filter(lambda==lambda_opt,
+         term!="(Intercept)") %>% 
+  pull(term) 
+
+
+
+```
+
+
+```{r}
+x <- x %>% 
+  data.frame() %>% 
+  select(selected_cols) %>% 
+  data.matrix()
+y = bw_df$bwt
+
+
+linear_model_1 = lm(y ~ x)
+summary(linear_model_1)
+linear_model_1 %>% 
+  broom::tidy() %>% 
+  knitr::kable()
+
+a<-summary(linear_model_1) %>% 
+  broom::tidy() %>% 
+  filter(p.value<=0.05) %>% 
+  pull(term)
+
+```
+
+In these variable, p value which is less than 0.05 should be kept:</br>
+`r a`
+
+```{r}
+bw_df %>% 
+  modelr::add_residuals(linear_model_1) %>% 
+  modelr::add_predictions(linear_model_1) %>% 
+  ggplot(aes(x = pred, y = resid)) +
+  geom_point(alpha = 0.6)
+```
+
+Although outlines exist when prediction is small, in the most of the time
+the plot shows no heteroscedasticity and distribute around 0.
+
+
+Compare your model to two others:
+
+* One using length at birth and gestational age as predictors (main effects only)
+* One using head circumference, length, sex, and all interactions (including the three-way interaction) between these
+```{r}
+linear_model_2 <- lm(bwt ~ blength + gaweeks, data = bw_df)
+linear_model_3 <-
+  lm(bwt ~ bhead + blength + babysex + bhead*blength + bhead*babysex + blength*babysex + bhead*blength*babysex, data = bw_df)
+summary(linear_model_2)
+summary(linear_model_3)
+
+```
+
+Make this comparison in terms of the cross-validated prediction error and violin plot.
+```{r}
+cv_df <-  
+  crossv_mc(bw_df, 100) %>% 
+  mutate(
+    train = map(train, as_tibble),
+    test = map(test, as_tibble)) %>% 
+  mutate(
+    linear_model_1 = map(train, 
+                         ~lm(bwt ~ babysex+bhead+blength+delwt+
+                                    fincome+frace+gaweeks+menarche+
+                                    mheight+momage+mrace+mrace+
+                                    mrace+smoken+wtgain, 
+                         data = .x)),
+    linear_model_2 = map(train, 
+                         ~lm(bwt ~ blength + gaweeks, 
+                         data = .x)),
+    linear_model_3 = map(train, 
+                         ~lm(bwt ~ bhead + blength + babysex + bhead*blength +                                   bhead*babysex + blength*babysex +
+                             bhead*blength*babysex,
+                         data = .x))) %>% 
+  mutate(
+    rmse_model_1 = map2_dbl(linear_model_1, test, ~rmse(model = .x, data = .y)),
+    rmse_model_2 = map2_dbl(linear_model_2, test, ~rmse(model = .x, data = .y)),
+    rmse_model_3 = map2_dbl(linear_model_3, test, ~rmse(model = .x, data = .y)))
+
+
+cv_df %>% 
+  select(starts_with("rmse")) %>% 
+  pivot_longer(
+    everything(),
+    names_to = "model", 
+    values_to = "rmse",
+    names_prefix = "rmse_") %>% 
+  mutate(model = fct_inorder(model)) %>% 
+  ggplot(aes(x = model, y = rmse)) + 
+  geom_violin(aes(color=model)) +
+  scale_x_discrete(breaks = c("model_1","model_2","model_3"))+
+  labs(title = "Distribution of Prediction Error")+
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+## Problem 2
+
+```{r}
+weather_df = 
+  rnoaa::meteo_pull_monitors(
+    c("USW00094728"),
+    var = c("PRCP", "TMIN", "TMAX"), 
+    date_min = "2017-01-01",
+    date_max = "2017-12-31") %>%
+  mutate(
+    name = recode(id, USW00094728 = "CentralPark_NY"),
+    tmin = tmin / 10,
+    tmax = tmax / 10) %>%
+  select(name, id, everything())
+```
+
+We’ll focus on a simple linear regression with tmax as the response and tmin as the predictor, and are interested in the distribution of two quantities estimated from these data:
+ $r^{2}$ and $log(\beta_{0}*\beta_{1})$
+```{r}
+linear_model = lm(tmax ~ tmin, data = weather_df)
+# R2
+R_2 = 
+  linear_model %>% 
+    broom::glance() %>% 
+    pull(r.squared)
+# log(β^0∗β^1)
+linear_model_df = 
+  linear_model %>% 
+  broom::tidy()
+beta0 = linear_model_df %>%  filter(term == '(Intercept)') %>%  pull(estimate)
+beta1 = linear_model_df %>%  filter(term == 'tmin') %>%  pull(estimate)
+logbeta = log(beta0 * beta1)
+print(R_2)
+print(logbeta)
+
+
+
+```
+
+
+Use 5000 bootstrap samples and, for each bootstrap sample, produce estimates of these two quantities.
+```{r}
+weather_samples <- 
+  weather_df %>% 
+    modelr::bootstrap(n = 5000) %>% 
+    mutate(
+      models = map(strap, ~ lm(tmax ~ tmin, data = .x)),
+      estimates = map(models, broom::tidy),
+      glance = map(models, broom::glance))
+weather_samples_info <- 
+  weather_samples %>% 
+    unnest(glance, estimates) %>% 
+    select(.id, term, estimate, r.squared) %>% 
+    # bracket can cause error
+    mutate(term = ifelse(term == '(Intercept)', 'beta0', 'beta1')) 
+
+
+weather_samples_info <- weather_samples_info %>% 
+    pivot_wider(names_from = term, 
+                values_from = estimate) %>% 
+    mutate(
+      logbeta = log(beta0 * beta1)
+    )
+
+
+```
+
+
+
+Using the 5000 bootstrap estimates, identify the 2.5% and 97.5% quantiles to provide a 95% confidence interval 
+```{r}
+weather_samples_info %>% 
+  summarize(
+    r_low = quantile(r.squared,probs = c(0.025)),
+    r_high = quantile(r.squared,probs = c(0.975))
+  ) %>% 
+  knitr::kable()
+weather_samples_info %>% 
+  summarize(
+    logbeta_low = quantile(logbeta,probs = c(0.025)),
+    logbeta_high = quantile(logbeta,probs = c(0.975))
+  ) %>% 
+  knitr::kable()
+```
+
+
